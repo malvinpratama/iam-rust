@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt_cfg = JwtConfig::from_env();
     let jwt = JwtManager::new(&jwt_cfg);
-    let svc = AuthSvc::new(repo, jwt, jwt_cfg.refresh_ttl_secs);
+    let svc = AuthSvc::new(repo, jwt, jwt_cfg.refresh_ttl_secs, Box::new(common::email::LogSender));
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter.set_serving::<AuthServiceServer<AuthSvc>>().await;

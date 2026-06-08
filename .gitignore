@@ -6,3 +6,6 @@
 **/data/
 # keep .sqlx for offline builds; uncomment to ignore
 # .sqlx/
+
+# generated TLS certs (gen-certs.sh)
+deploy/tls/

@@ -1,6 +1,7 @@
 //! Shared utilities for the Rust services: config, JWT, password hashing, telemetry.
 
 pub mod config;
+pub mod email;
 pub mod jwt;
 pub mod password;
 pub mod telemetry;

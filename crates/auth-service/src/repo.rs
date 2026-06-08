@@ -11,6 +11,20 @@ pub struct UserRow {
     pub password_hash: String,
     #[allow(dead_code)]
     pub status: String,
+    pub email_verified: bool,
+    pub failed_login_attempts: i32,
+    pub locked_until: Option<DateTime<Utc>>,
+}
+
+#[derive(FromRow)]
+pub struct AuditRow {
+    pub id: i64,
+    pub actor_id: String,
+    pub actor_email: String,
+    pub action: String,
+    pub target: String,
+    pub detail: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(FromRow)]
@@ -77,7 +91,7 @@ impl Repo {
 
     pub async fn get_user_by_email(&self, email: &str) -> sqlx::Result<Option<UserRow>> {
         sqlx::query_as::<_, UserRow>(
-            "SELECT id, email, password_hash, status FROM users WHERE email = $1",
+            "SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until FROM users WHERE email = $1",
         )
         .bind(email)
         .fetch_optional(&self.pool)
@@ -86,7 +100,7 @@ impl Repo {
 
     pub async fn get_user_by_id(&self, id: Uuid) -> sqlx::Result<Option<UserRow>> {
         sqlx::query_as::<_, UserRow>(
-            "SELECT id, email, password_hash, status FROM users WHERE id = $1",
+            "SELECT id, email, password_hash, status, email_verified, failed_login_attempts, locked_until FROM users WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -100,6 +114,110 @@ impl Repo {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // ── v0.2: lockout, email verification, password reset, audit ──
+
+    pub async fn increment_login_failure(&self, id: Uuid) -> sqlx::Result<i32> {
+        sqlx::query_scalar(
+            "UPDATE users SET failed_login_attempts = failed_login_attempts + 1 WHERE id = $1 RETURNING failed_login_attempts",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+    }
+
+    pub async fn lock_user(&self, id: Uuid, until: DateTime<Utc>) -> sqlx::Result<()> {
+        sqlx::query("UPDATE users SET locked_until = $2, failed_login_attempts = 0 WHERE id = $1")
+            .bind(id)
+            .bind(until)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn reset_login_state(&self, id: Uuid) -> sqlx::Result<()> {
+        sqlx::query("UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn mark_email_verified(&self, id: Uuid) -> sqlx::Result<()> {
+        sqlx::query("UPDATE users SET email_verified = true WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn update_password(&self, id: Uuid, hash: &str) -> sqlx::Result<()> {
+        sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
+            .bind(id)
+            .bind(hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn revoke_all_user_refresh_tokens(&self, user_id: Uuid) -> sqlx::Result<()> {
+        sqlx::query("UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn create_email_verification(&self, token_hash: &str, user_id: Uuid, expires_at: DateTime<Utc>) -> sqlx::Result<()> {
+        sqlx::query("INSERT INTO email_verifications (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")
+            .bind(token_hash).bind(user_id).bind(expires_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn consume_email_verification(&self, token_hash: &str) -> sqlx::Result<Option<Uuid>> {
+        sqlx::query_scalar(
+            "UPDATE email_verifications SET consumed_at = now() \
+             WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() RETURNING user_id",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn create_password_reset(&self, token_hash: &str, user_id: Uuid, expires_at: DateTime<Utc>) -> sqlx::Result<()> {
+        sqlx::query("INSERT INTO password_resets (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")
+            .bind(token_hash).bind(user_id).bind(expires_at)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn consume_password_reset(&self, token_hash: &str) -> sqlx::Result<Option<Uuid>> {
+        sqlx::query_scalar(
+            "UPDATE password_resets SET consumed_at = now() \
+             WHERE token_hash = $1 AND consumed_at IS NULL AND expires_at > now() RETURNING user_id",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await
+    }
+
+    pub async fn insert_audit(&self, actor_id: &str, actor_email: &str, action: &str, target: &str, detail: &str) -> sqlx::Result<()> {
+        sqlx::query("INSERT INTO audit_events (actor_id, actor_email, action, target, detail) VALUES ($1, $2, $3, $4, $5)")
+            .bind(actor_id).bind(actor_email).bind(action).bind(target).bind(detail)
+            .execute(&self.pool).await?;
+        Ok(())
+    }
+
+    pub async fn list_audit(&self, limit: i64) -> sqlx::Result<Vec<AuditRow>> {
+        sqlx::query_as::<_, AuditRow>(
+            "SELECT id, actor_id, actor_email, action, target, detail, created_at \
+             FROM audit_events ORDER BY id DESC LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
     }
 
     pub async fn revoke_access_jti(&self, jti: &str, expires_at: DateTime<Utc>) -> sqlx::Result<()> {

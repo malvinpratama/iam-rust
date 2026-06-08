@@ -33,6 +33,28 @@ pub fn internal_token() -> String {
     env_or("INTERNAL_SERVICE_TOKEN", "")
 }
 
+// ── v0.2 Security+ feature toggles (defaults keep current behavior) ──
+
+/// Block login for unverified users when true.
+pub fn require_email_verification() -> bool {
+    env_or("REQUIRE_EMAIL_VERIFICATION", "false") == "true"
+}
+
+/// Failed-login threshold before lockout (0 disables).
+pub fn login_max_failures() -> i64 {
+    crate::env_int("LOGIN_MAX_FAILURES", 5)
+}
+
+/// Lockout duration in seconds.
+pub fn login_lockout_secs() -> i64 {
+    crate::env_int("LOGIN_LOCKOUT_SECONDS", 900)
+}
+
+/// Whether sensitive actions are written to the audit log.
+pub fn audit_enabled() -> bool {
+    env_or("AUDIT_ENABLED", "true") != "false"
+}
+
 /// Fail fast on insecure configuration in production.
 pub fn validate_security() -> Result<(), String> {
     if !is_production() {
