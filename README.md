@@ -8,7 +8,7 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **Identity & Access Management** — Auth + User microservices with **granular
-RBAC**, built in **Rust**. Sibling Go implementation: [`../iam-go`](../iam-go).
+RBAC**, built in **Rust**. Sibling Go implementation: [iam-go](https://github.com/malvinpratama/iam-go).
 
 > Stack: **Rust · Axum** (REST gateway) · **Tonic/gRPC** (inter-service) ·
 > **Tokio** · **PostgreSQL** · **sqlx** · **JWT** (access + refresh, revocable).
