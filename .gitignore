@@ -1,0 +1,8 @@
+/target/
+**/*.rs.bk
+.env
+*.local
+.DS_Store
+**/data/
+# keep .sqlx for offline builds; uncomment to ignore
+# .sqlx/
