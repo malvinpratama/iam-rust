@@ -51,6 +51,7 @@ services:
 
   auth:
     image: ghcr.io/malvinpratama/iam-rust-auth:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
@@ -76,6 +77,7 @@ services:
 
   user:
     image: ghcr.io/malvinpratama/iam-rust-user:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       USER_DATABASE_URL: ${USER_DATABASE_URL}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
@@ -91,6 +93,7 @@ services:
 
   gateway:
     image: ghcr.io/malvinpratama/iam-rust-gateway:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-8080}
       AUTH_GRPC_ADDR: ${AUTH_GRPC_ADDR:-http://auth:50051}
