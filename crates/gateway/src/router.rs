@@ -26,6 +26,7 @@ pub fn build(state: AppState) -> Router {
         .route("/auth/logout", post(logout))
         .route("/me", get(get_identity))
         .route("/permissions", get(list_permissions))
+        .route("/audit", get(list_audit))
         .route("/users/me", get(get_me))
         .route("/users/:id", get(get_user).patch(update_user).delete(delete_user))
         .route("/users", get(list_users))
@@ -43,6 +44,10 @@ pub fn build(state: AppState) -> Router {
         .route("/auth/register", post(register))
         .route("/auth/login", post(login))
         .route("/auth/refresh", post(refresh))
+        .route("/auth/verify-email/request", post(request_email_verification))
+        .route("/auth/verify-email", post(verify_email))
+        .route("/auth/password-reset/request", post(request_password_reset))
+        .route("/auth/password-reset", post(reset_password))
         .route_layer(from_fn_with_state(limiter, ratelimit::limit));
 
     let public = Router::new()
@@ -66,6 +71,22 @@ struct Credentials {
 #[derive(Deserialize)]
 struct RefreshBody {
     refresh_token: String,
+}
+
+#[derive(Deserialize)]
+struct EmailBody {
+    email: String,
+}
+
+#[derive(Deserialize)]
+struct TokenBody {
+    token: String,
+}
+
+#[derive(Deserialize)]
+struct ResetPasswordBody {
+    token: String,
+    new_password: String,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +125,11 @@ struct ListQuery {
     page: Option<i32>,
     page_size: Option<i32>,
     query: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AuditQuery {
+    limit: Option<i32>,
 }
 
 // ── auth handlers ───────────────────────────────────────────
@@ -176,6 +202,79 @@ async fn logout(
         })
         .await?;
     Ok(Json(json!({ "success": true })))
+}
+
+// ── account recovery & verification (v0.2) ──────────────────
+
+async fn request_email_verification(
+    State(mut state): State<AppState>,
+    Json(body): Json<EmailBody>,
+) -> ApiResult<Json<Value>> {
+    let res = state
+        .auth
+        .request_email_verification(authpb::EmailRequest { email: body.email })
+        .await?
+        .into_inner();
+    Ok(Json(dev_token_json(res)))
+}
+
+async fn verify_email(
+    State(mut state): State<AppState>,
+    Json(body): Json<TokenBody>,
+) -> ApiResult<Json<Value>> {
+    state.auth.verify_email(authpb::TokenRequest { token: body.token }).await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+async fn request_password_reset(
+    State(mut state): State<AppState>,
+    Json(body): Json<EmailBody>,
+) -> ApiResult<Json<Value>> {
+    let res = state
+        .auth
+        .request_password_reset(authpb::EmailRequest { email: body.email })
+        .await?
+        .into_inner();
+    Ok(Json(dev_token_json(res)))
+}
+
+async fn reset_password(
+    State(mut state): State<AppState>,
+    Json(body): Json<ResetPasswordBody>,
+) -> ApiResult<Json<Value>> {
+    state
+        .auth
+        .reset_password(authpb::ResetPasswordRequest { token: body.token, new_password: body.new_password })
+        .await?;
+    Ok(Json(json!({ "success": true })))
+}
+
+fn dev_token_json(res: authpb::DevTokenResponse) -> Value {
+    if res.dev_token.is_empty() {
+        json!({ "success": res.success })
+    } else {
+        json!({ "success": res.success, "dev_token": res.dev_token })
+    }
+}
+
+async fn list_audit(
+    State(mut state): State<AppState>,
+    identity: Identity,
+    Query(q): Query<AuditQuery>,
+) -> ApiResult<Json<Value>> {
+    identity.require("audit:read")?;
+    let mut req = Request::new(authpb::ListAuditEventsRequest { limit: q.limit.unwrap_or(0) });
+    attach_identity(&mut req, &identity);
+    let res = state.auth.list_audit_events(req).await?.into_inner();
+    let events: Vec<Value> = res
+        .events
+        .into_iter()
+        .map(|e| json!({
+            "id": e.id, "actor_id": e.actor_id, "actor_email": e.actor_email,
+            "action": e.action, "target": e.target, "detail": e.detail, "created_at": e.created_at,
+        }))
+        .collect();
+    Ok(Json(json!({ "events": events })))
 }
 
 fn bearer_from(headers: &HeaderMap) -> String {

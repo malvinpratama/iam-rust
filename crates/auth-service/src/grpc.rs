@@ -3,9 +3,11 @@
 use chrono::{Duration, Utc};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use uuid::Uuid;
 
+use common::email::Sender;
 use common::jwt::JwtManager;
 use common::password;
 use proto::auth::v1::auth_service_server::AuthService;
@@ -20,11 +22,12 @@ pub struct AuthSvc {
     jwt: JwtManager,
     refresh_ttl_secs: i64,
     dummy_hash: String, // constant-time login on unknown users
+    mail: Box<dyn Sender>,
 }
 
 /// Enforce a permission from the gateway-supplied identity metadata
 /// (defense-in-depth: the service re-checks, not just the gateway).
-fn require_perm(md: &tonic::metadata::MetadataMap, perm: &str) -> Result<(), Status> {
+fn require_perm(md: &MetadataMap, perm: &str) -> Result<(), Status> {
     let ok = md
         .get("x-user-permissions")
         .and_then(|v| v.to_str().ok())
@@ -37,10 +40,28 @@ fn require_perm(md: &tonic::metadata::MetadataMap, perm: &str) -> Result<(), Sta
     }
 }
 
+fn meta(md: &MetadataMap, key: &str) -> String {
+    md.get(key).and_then(|v| v.to_str().ok()).unwrap_or("").to_string()
+}
+
 impl AuthSvc {
-    pub fn new(repo: Repo, jwt: JwtManager, refresh_ttl_secs: i64) -> Self {
+    pub fn new(repo: Repo, jwt: JwtManager, refresh_ttl_secs: i64, mail: Box<dyn Sender>) -> Self {
         let dummy_hash = password::hash("constant-time-dummy-password").unwrap_or_default();
-        Self { repo, jwt, refresh_ttl_secs, dummy_hash }
+        Self { repo, jwt, refresh_ttl_secs, dummy_hash, mail }
+    }
+
+    /// Record a sensitive action with an explicit actor.
+    async fn audit_as(&self, actor_id: &str, actor_email: &str, action: &str, target: &str, detail: &str) {
+        if common::config::audit_enabled() {
+            let _ = self.repo.insert_audit(actor_id, actor_email, action, target, detail).await;
+        }
+    }
+
+    /// Record a sensitive action with the actor taken from gateway metadata.
+    async fn audit(&self, md: &MetadataMap, action: &str, target: &str, detail: &str) {
+        let actor_id = meta(md, "x-user-id");
+        let actor_email = meta(md, "x-user-email");
+        self.audit_as(&actor_id, &actor_email, action, target, detail).await;
     }
 
     async fn issue_tokens(&self, user_id: Uuid, email: &str) -> Result<TokenPair, Status> {
@@ -80,6 +101,7 @@ impl AuthService for AuthSvc {
             .create_user_with_role(&req.email, &hash, DEFAULT_ROLE)
             .await
             .map_err(|_| Status::already_exists("email already registered"))?;
+        self.audit_as(&id.to_string(), &req.email, "user.register", "", "").await;
         Ok(Response::new(RegisterResponse {
             user_id: id.to_string(),
             email: req.email,
@@ -104,9 +126,35 @@ impl AuthService for AuthSvc {
                 return Err(Status::unauthenticated("invalid credentials"));
             }
         };
+
+        // Account lockout: refuse while locked.
+        if let Some(until) = user.locked_until {
+            if until > Utc::now() {
+                return Err(Status::unauthenticated("account temporarily locked, try again later"));
+            }
+        }
+
         if !password::verify(&user.password_hash, &req.password) {
+            let max = common::config::login_max_failures();
+            if max > 0 {
+                if let Ok(n) = self.repo.increment_login_failure(user.id).await {
+                    if (n as i64) >= max {
+                        let until = Utc::now() + Duration::seconds(common::config::login_lockout_secs());
+                        let _ = self.repo.lock_user(user.id, until).await;
+                        self.audit_as(&user.id.to_string(), &user.email, "login.locked", "", "too many failed attempts").await;
+                    }
+                }
+            }
+            self.audit_as(&user.id.to_string(), &user.email, "login.failure", "", "").await;
             return Err(Status::unauthenticated("invalid credentials"));
         }
+
+        if common::config::require_email_verification() && !user.email_verified {
+            return Err(Status::unauthenticated("email not verified"));
+        }
+
+        let _ = self.repo.reset_login_state(user.id).await;
+        self.audit_as(&user.id.to_string(), &user.email, "login.success", "", "").await;
         let pair = self.issue_tokens(user.id, &user.email).await?;
         Ok(Response::new(pair))
     }
@@ -124,6 +172,9 @@ impl AuthService for AuthSvc {
             .map_err(|_| Status::internal("db error"))?
             .ok_or_else(|| Status::unauthenticated("invalid refresh token"))?;
         if row.revoked_at.is_some() {
+            // Reuse of an already-revoked token suggests theft → revoke the family.
+            let _ = self.repo.revoke_all_user_refresh_tokens(row.user_id).await;
+            self.audit_as(&row.user_id.to_string(), "", "refresh.reuse_detected", "", "all sessions revoked").await;
             return Err(Status::unauthenticated("refresh token revoked"));
         }
         if row.expires_at < Utc::now() {
@@ -148,6 +199,7 @@ impl AuthService for AuthSvc {
         &self,
         request: Request<LogoutRequest>,
     ) -> Result<Response<LogoutResponse>, Status> {
+        let md = request.metadata().clone();
         let req = request.into_inner();
         self.repo
             .revoke_refresh_token(&hash_token(&req.refresh_token))
@@ -161,6 +213,7 @@ impl AuthService for AuthSvc {
                 }
             }
         }
+        self.audit(&md, "auth.logout", "", "").await;
         Ok(Response::new(LogoutResponse { success: true }))
     }
 
@@ -206,6 +259,7 @@ impl AuthService for AuthSvc {
         request: Request<DeleteUserRequest>,
     ) -> Result<Response<DeleteUserResponse>, Status> {
         require_perm(request.metadata(), "user:delete")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         let user_id = Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user id"))?;
@@ -213,6 +267,7 @@ impl AuthService for AuthSvc {
             .delete_user(user_id)
             .await
             .map_err(|_| Status::internal("failed to delete user"))?;
+        self.audit(&md, "user.delete", &req.user_id, "").await;
         Ok(Response::new(DeleteUserResponse { success: true }))
     }
 
@@ -221,12 +276,14 @@ impl AuthService for AuthSvc {
         request: Request<CreateRoleRequest>,
     ) -> Result<Response<Role>, Status> {
         require_perm(request.metadata(), "role:write")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         let role = self
             .repo
             .create_role(&req.name, &req.description)
             .await
             .map_err(|_| Status::already_exists("role already exists"))?;
+        self.audit(&md, "role.create", &req.name, "").await;
         Ok(Response::new(Role {
             id: role.id,
             name: role.name,
@@ -260,6 +317,7 @@ impl AuthService for AuthSvc {
         request: Request<DeleteRoleRequest>,
     ) -> Result<Response<DeleteRoleResponse>, Status> {
         require_perm(request.metadata(), "role:write")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         if req.name == "admin" || req.name == "user" {
             return Err(Status::failed_precondition("cannot delete built-in role"));
@@ -276,6 +334,7 @@ impl AuthService for AuthSvc {
             .delete_role(&req.name)
             .await
             .map_err(|_| Status::internal("failed to delete role"))?;
+        self.audit(&md, "role.delete", &req.name, "").await;
         Ok(Response::new(DeleteRoleResponse { success: true }))
     }
 
@@ -310,6 +369,7 @@ impl AuthService for AuthSvc {
         request: Request<AssignRoleRequest>,
     ) -> Result<Response<AssignRoleResponse>, Status> {
         require_perm(request.metadata(), "role:assign")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         let user_id = Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user id"))?;
@@ -325,6 +385,7 @@ impl AuthService for AuthSvc {
             .assign_role(user_id, &req.role_name)
             .await
             .map_err(|_| Status::internal("failed to assign role"))?;
+        self.audit(&md, "role.assign", &req.user_id, &req.role_name).await;
         Ok(Response::new(AssignRoleResponse { success: true }))
     }
 
@@ -333,6 +394,7 @@ impl AuthService for AuthSvc {
         request: Request<RevokeRoleRequest>,
     ) -> Result<Response<RevokeRoleResponse>, Status> {
         require_perm(request.metadata(), "role:assign")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         let user_id = Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user id"))?;
@@ -348,6 +410,7 @@ impl AuthService for AuthSvc {
             .revoke_role(user_id, &req.role_name)
             .await
             .map_err(|_| Status::internal("failed to revoke role"))?;
+        self.audit(&md, "role.revoke", &req.user_id, &req.role_name).await;
         Ok(Response::new(RevokeRoleResponse { success: true }))
     }
 
@@ -376,11 +439,13 @@ impl AuthService for AuthSvc {
         request: Request<GrantPermissionRequest>,
     ) -> Result<Response<GrantPermissionResponse>, Status> {
         require_perm(request.metadata(), "role:write")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         self.repo
             .grant_permission(&req.role_name, &req.permission_name)
             .await
             .map_err(|_| Status::internal("failed to grant permission"))?;
+        self.audit(&md, "permission.grant", &req.role_name, &req.permission_name).await;
         Ok(Response::new(GrantPermissionResponse { success: true }))
     }
 
@@ -389,12 +454,139 @@ impl AuthService for AuthSvc {
         request: Request<RevokePermissionRequest>,
     ) -> Result<Response<RevokePermissionResponse>, Status> {
         require_perm(request.metadata(), "role:write")?;
+        let md = request.metadata().clone();
         let req = request.into_inner();
         self.repo
             .revoke_permission(&req.role_name, &req.permission_name)
             .await
             .map_err(|_| Status::internal("failed to revoke permission"))?;
+        self.audit(&md, "permission.revoke", &req.role_name, &req.permission_name).await;
         Ok(Response::new(RevokePermissionResponse { success: true }))
+    }
+
+    // ── Account recovery & verification (v0.2) ──────────────
+
+    async fn request_email_verification(
+        &self,
+        request: Request<EmailRequest>,
+    ) -> Result<Response<DevTokenResponse>, Status> {
+        let req = request.into_inner();
+        let mut resp = DevTokenResponse { success: true, dev_token: String::new() };
+        let user = match self.repo.get_user_by_email(&req.email).await {
+            Ok(Some(u)) => u,
+            _ => return Ok(Response::new(resp)), // don't reveal existence
+        };
+        let token = gen_refresh_token();
+        let exp = Utc::now() + Duration::hours(24);
+        self.repo
+            .create_email_verification(&hash_token(&token), user.id, exp)
+            .await
+            .map_err(|_| Status::internal("failed to create verification"))?;
+        self.mail.send(&user.email, "Verify your email", &format!("Your email verification token: {token}"));
+        self.audit_as(&user.id.to_string(), &user.email, "email.verification_requested", "", "").await;
+        if !common::config::is_production() {
+            resp.dev_token = token;
+        }
+        Ok(Response::new(resp))
+    }
+
+    async fn verify_email(
+        &self,
+        request: Request<TokenRequest>,
+    ) -> Result<Response<GenericResponse>, Status> {
+        let req = request.into_inner();
+        let uid = self
+            .repo
+            .consume_email_verification(&hash_token(&req.token))
+            .await
+            .map_err(|_| Status::internal("db error"))?
+            .ok_or_else(|| Status::invalid_argument("invalid or expired token"))?;
+        self.repo
+            .mark_email_verified(uid)
+            .await
+            .map_err(|_| Status::internal("failed to verify email"))?;
+        self.audit_as(&uid.to_string(), "", "email.verified", "", "").await;
+        Ok(Response::new(GenericResponse { success: true }))
+    }
+
+    async fn request_password_reset(
+        &self,
+        request: Request<EmailRequest>,
+    ) -> Result<Response<DevTokenResponse>, Status> {
+        let req = request.into_inner();
+        let mut resp = DevTokenResponse { success: true, dev_token: String::new() };
+        let user = match self.repo.get_user_by_email(&req.email).await {
+            Ok(Some(u)) => u,
+            _ => return Ok(Response::new(resp)),
+        };
+        let token = gen_refresh_token();
+        let exp = Utc::now() + Duration::hours(1);
+        self.repo
+            .create_password_reset(&hash_token(&token), user.id, exp)
+            .await
+            .map_err(|_| Status::internal("failed to create reset token"))?;
+        self.mail.send(&user.email, "Reset your password", &format!("Your password reset token: {token}"));
+        self.audit_as(&user.id.to_string(), &user.email, "password.reset_requested", "", "").await;
+        if !common::config::is_production() {
+            resp.dev_token = token;
+        }
+        Ok(Response::new(resp))
+    }
+
+    async fn reset_password(
+        &self,
+        request: Request<ResetPasswordRequest>,
+    ) -> Result<Response<GenericResponse>, Status> {
+        let req = request.into_inner();
+        if req.new_password.len() < 8 {
+            return Err(Status::invalid_argument("password must be at least 8 characters"));
+        }
+        let uid = self
+            .repo
+            .consume_password_reset(&hash_token(&req.token))
+            .await
+            .map_err(|_| Status::internal("db error"))?
+            .ok_or_else(|| Status::invalid_argument("invalid or expired token"))?;
+        let hash = password::hash(&req.new_password).map_err(|_| Status::internal("failed to hash password"))?;
+        self.repo
+            .update_password(uid, &hash)
+            .await
+            .map_err(|_| Status::internal("failed to update password"))?;
+        let _ = self.repo.revoke_all_user_refresh_tokens(uid).await;
+        self.audit_as(&uid.to_string(), "", "password.reset", "", "").await;
+        Ok(Response::new(GenericResponse { success: true }))
+    }
+
+    // ── Audit (v0.2) ────────────────────────────────────────
+
+    async fn list_audit_events(
+        &self,
+        request: Request<ListAuditEventsRequest>,
+    ) -> Result<Response<ListAuditEventsResponse>, Status> {
+        require_perm(request.metadata(), "audit:read")?;
+        let req = request.into_inner();
+        let mut limit = req.limit as i64;
+        if limit <= 0 || limit > 200 {
+            limit = 50;
+        }
+        let rows = self
+            .repo
+            .list_audit(limit)
+            .await
+            .map_err(|_| Status::internal("failed to list audit events"))?;
+        let events = rows
+            .into_iter()
+            .map(|e| AuditEvent {
+                id: e.id,
+                actor_id: e.actor_id,
+                actor_email: e.actor_email,
+                action: e.action,
+                target: e.target,
+                detail: e.detail,
+                created_at: e.created_at.to_rfc3339(),
+            })
+            .collect();
+        Ok(Response::new(ListAuditEventsResponse { events }))
     }
 }
 
