@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod email;
+pub mod events;
 pub mod jwt;
 pub mod password;
 pub mod telemetry;

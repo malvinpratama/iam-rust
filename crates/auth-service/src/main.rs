@@ -1,4 +1,5 @@
 mod grpc;
+mod relay;
 mod repo;
 
 use std::time::Duration;
@@ -31,6 +32,19 @@ async fn main() -> anyhow::Result<()> {
 
     let repo = Repo::new(pool);
     bootstrap_admin(&repo).await?;
+
+    // Outbox relay → NATS JetStream. Optional: without NATS_URL events are still
+    // recorded; the gateway's lazy profile healing keeps the system working.
+    match common::config::nats_url() {
+        url if !url.is_empty() => {
+            let js = common::events::connect(&url).await?;
+            common::events::ensure_stream(&js).await?;
+            let relay_repo = repo.clone();
+            tokio::spawn(async move { relay::run(relay_repo, js).await });
+            tracing::info!(nats = %url, "outbox relay started");
+        }
+        _ => tracing::warn!("NATS_URL not set — event publishing disabled"),
+    }
 
     let jwt_cfg = JwtConfig::from_env();
     let jwt = JwtManager::new(&jwt_cfg);

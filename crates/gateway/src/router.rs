@@ -147,16 +147,10 @@ async fn register(
         .await?
         .into_inner();
 
-    // Orchestrate profile creation in the User service.
-    let display = body.email.split('@').next().unwrap_or(&body.email).to_string();
-    state
-        .user
-        .create_profile(userpb::CreateProfileRequest {
-            user_id: reg.user_id.clone(),
-            display_name: display,
-        })
-        .await?;
-
+    // Profile creation is now driven asynchronously by a UserRegistered event
+    // (transactional outbox in auth → NATS → user service). The gateway no
+    // longer calls the user service here; GET /users/me heals lazily if a read
+    // arrives before the event is processed.
     Ok((
         StatusCode::CREATED,
         Json(json!({ "user_id": reg.user_id, "email": reg.email })),
@@ -413,13 +407,11 @@ async fn delete_user(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     identity.require("user:delete")?;
-    // Delete the identity (credentials, roles, refresh tokens) AND the profile.
-    let mut areq = Request::new(authpb::DeleteUserRequest { user_id: id.clone() });
+    // Delete the identity (credentials, roles, refresh tokens). The matching
+    // profile is dropped asynchronously via a UserDeleted event.
+    let mut areq = Request::new(authpb::DeleteUserRequest { user_id: id });
     attach_identity(&mut areq, &identity);
     state.auth.delete_user(areq).await?;
-    let mut ureq = Request::new(userpb::DeleteProfileRequest { user_id: id });
-    attach_identity(&mut ureq, &identity);
-    state.user.delete_profile(ureq).await?;
     Ok(Json(json!({ "success": true })))
 }
 

@@ -41,6 +41,13 @@ pub struct RoleRow {
     pub description: String,
 }
 
+#[derive(FromRow)]
+pub struct OutboxRow {
+    pub id: Uuid,
+    pub event_type: String,
+    pub payload: String,
+}
+
 #[derive(Clone)]
 pub struct Repo {
     pub pool: PgPool,
@@ -110,6 +117,84 @@ impl Repo {
     pub async fn delete_user(&self, id: Uuid) -> sqlx::Result<()> {
         // FK cascade removes user_roles and refresh_tokens.
         sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    // ── Transactional outbox (events written atomically with the change) ──
+
+    /// Create a user + default role + a UserRegistered outbox row in one tx.
+    /// The id is supplied so the caller can embed it in the event payload.
+    pub async fn create_user_with_role_event(
+        &self,
+        id: Uuid,
+        email: &str,
+        password_hash: &str,
+        role: &str,
+        event_type: &str,
+        payload: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO users (id, email, password_hash) VALUES ($1, $2, $3)")
+            .bind(id)
+            .bind(email)
+            .bind(password_hash)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO user_roles (user_id, role_id) \
+             SELECT $1, r.id FROM roles r WHERE r.name = $2 ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(role)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("INSERT INTO outbox (aggregate_id, event_type, payload) VALUES ($1, $2, $3::jsonb)")
+            .bind(id)
+            .bind(event_type)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Delete a user + a UserDeleted outbox row in one tx.
+    pub async fn delete_user_event(
+        &self,
+        id: Uuid,
+        event_type: &str,
+        payload: &str,
+    ) -> sqlx::Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("INSERT INTO outbox (aggregate_id, event_type, payload) VALUES ($1, $2, $3::jsonb)")
+            .bind(id)
+            .bind(event_type)
+            .bind(payload)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn fetch_unpublished_outbox(&self, limit: i64) -> sqlx::Result<Vec<OutboxRow>> {
+        sqlx::query_as::<_, OutboxRow>(
+            "SELECT id, event_type, payload::text AS payload FROM outbox \
+             WHERE published_at IS NULL ORDER BY created_at LIMIT $1",
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+    }
+
+    pub async fn mark_outbox_published(&self, id: Uuid) -> sqlx::Result<()> {
+        sqlx::query("UPDATE outbox SET published_at = now() WHERE id = $1")
             .bind(id)
             .execute(&self.pool)
             .await?;

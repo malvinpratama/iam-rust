@@ -33,6 +33,12 @@ pub fn internal_token() -> String {
     env_or("INTERNAL_SERVICE_TOKEN", "")
 }
 
+/// NATS JetStream URL for async inter-service events. Empty disables the
+/// publisher/consumer (lazy profile healing remains), keeping the broker optional.
+pub fn nats_url() -> String {
+    env_or("NATS_URL", "")
+}
+
 // ── v0.2 Security+ feature toggles (defaults keep current behavior) ──
 
 /// Block login for unverified users when true.

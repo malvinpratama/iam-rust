@@ -1,3 +1,4 @@
+mod consumer;
 mod grpc;
 mod repo;
 
@@ -22,7 +23,21 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     tracing::info!("migrations applied");
 
-    let svc = UserSvc::new(Repo::new(pool));
+    let repo = Repo::new(pool);
+
+    // Subscribe to auth lifecycle events to keep profiles in sync. Optional:
+    // without NATS_URL profiles are created lazily on first read instead.
+    match common::config::nats_url() {
+        url if !url.is_empty() => {
+            let js = common::events::connect(&url).await?;
+            common::events::ensure_stream(&js).await?;
+            consumer::run(repo.clone(), js).await?;
+            tracing::info!(nats = %url, "event consumer connected");
+        }
+        _ => tracing::warn!("NATS_URL not set — event consumer disabled"),
+    }
+
+    let svc = UserSvc::new(repo);
 
     let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
     health_reporter.set_serving::<UserServiceServer<UserSvc>>().await;

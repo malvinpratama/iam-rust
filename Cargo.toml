@@ -43,6 +43,8 @@ thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+async-nats = "0.37"
+futures = "0.3"
 
 [profile.release]
 opt-level = 2

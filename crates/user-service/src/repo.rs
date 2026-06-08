@@ -81,6 +81,19 @@ impl Repo {
         Ok(())
     }
 
+    /// Idempotent profile creation for the event consumer (at-least-once delivery).
+    pub async fn upsert_profile(&self, user_id: Uuid, display_name: &str) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO profiles (user_id, display_name) VALUES ($1, $2) \
+             ON CONFLICT (user_id) DO NOTHING",
+        )
+        .bind(user_id)
+        .bind(display_name)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn list_profiles(
         &self,
         query: &str,

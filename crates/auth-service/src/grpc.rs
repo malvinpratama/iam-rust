@@ -96,9 +96,25 @@ impl AuthService for AuthSvc {
         }
         let hash =
             password::hash(&req.password).map_err(|_| Status::internal("failed to hash password"))?;
-        let id = self
-            .repo
-            .create_user_with_role(&req.email, &hash, DEFAULT_ROLE)
+        // Create the identity and enqueue a UserRegistered event in one tx
+        // (outbox pattern). The user service creates the profile asynchronously.
+        let id = Uuid::new_v4();
+        let display = req.email.split('@').next().unwrap_or(&req.email).to_string();
+        let payload = serde_json::to_string(&common::events::UserRegistered {
+            user_id: id.to_string(),
+            email: req.email.clone(),
+            display_name: display,
+        })
+        .map_err(|_| Status::internal("failed to encode event"))?;
+        self.repo
+            .create_user_with_role_event(
+                id,
+                &req.email,
+                &hash,
+                DEFAULT_ROLE,
+                common::events::TYPE_USER_REGISTERED,
+                &payload,
+            )
             .await
             .map_err(|_| Status::already_exists("email already registered"))?;
         self.audit_as(&id.to_string(), &req.email, "user.register", "", "").await;
@@ -263,8 +279,12 @@ impl AuthService for AuthSvc {
         let req = request.into_inner();
         let user_id = Uuid::parse_str(&req.user_id)
             .map_err(|_| Status::invalid_argument("invalid user id"))?;
+        let payload = serde_json::to_string(&common::events::UserDeleted {
+            user_id: req.user_id.clone(),
+        })
+        .map_err(|_| Status::internal("failed to encode event"))?;
         self.repo
-            .delete_user(user_id)
+            .delete_user_event(user_id, common::events::TYPE_USER_DELETED, &payload)
             .await
             .map_err(|_| Status::internal("failed to delete user"))?;
         self.audit(&md, "user.delete", &req.user_id, "").await;
