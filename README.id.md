@@ -9,7 +9,7 @@
 
 **Identity & Access Management** — microservice Auth + User dengan **RBAC
 granular**, dibangun dengan **Rust**. Implementasi Go pendamping:
-[`../iam-go`](../iam-go).
+[iam-go](https://github.com/malvinpratama/iam-go).
 
 > Stack: **Rust · Axum** (REST gateway) · **Tonic/gRPC** (antar-service) ·
 > **Tokio** · **PostgreSQL** · **sqlx** · **JWT** (access + refresh, bisa di-revoke).

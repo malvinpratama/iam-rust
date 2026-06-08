@@ -35,4 +35,4 @@ client ──REST──▶ Gateway (Axum) ──gRPC──▶ Auth Service ─�
                      └ validates JWT, resolves permissions, enforces RBAC per route
 ```
 
-Implementasi paralel dalam Go berada di [`../../../iam-go`](../../../iam-go).
+Implementasi paralel dalam Go berada di iam-go (https://github.com/malvinpratama/iam-go).

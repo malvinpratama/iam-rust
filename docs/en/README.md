@@ -35,4 +35,4 @@ client ──REST──▶ Gateway (Axum) ──gRPC──▶ Auth Service ─�
                      └ validates JWT, resolves permissions, enforces RBAC per route
 ```
 
-The parallel Go implementation lives in [`../../../iam-go`](../../../iam-go).
+The parallel Go implementation lives in iam-go (https://github.com/malvinpratama/iam-go).
