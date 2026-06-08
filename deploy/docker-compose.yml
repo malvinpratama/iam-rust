@@ -50,10 +50,7 @@ services:
       retries: 15
 
   auth:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: auth
+    image: ghcr.io/malvinpratama/iam-rust-auth:${IMAGE_TAG:-latest}
     environment:
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
@@ -78,10 +75,7 @@ services:
         condition: service_healthy
 
   user:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: user
+    image: ghcr.io/malvinpratama/iam-rust-user:${IMAGE_TAG:-latest}
     environment:
       USER_DATABASE_URL: ${USER_DATABASE_URL}
       NATS_URL: ${NATS_URL:-nats://nats:4222}
@@ -96,10 +90,7 @@ services:
         condition: service_healthy
 
   gateway:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: gateway
+    image: ghcr.io/malvinpratama/iam-rust-gateway:${IMAGE_TAG:-latest}
     environment:
       GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-8080}
       AUTH_GRPC_ADDR: ${AUTH_GRPC_ADDR:-http://auth:50051}
