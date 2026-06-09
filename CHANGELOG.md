@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-09
+
+### Changed (v0.4 — True microservices)
+- **Separate repositories per service**: this repo is now the platform/umbrella;
+  each service lives in its own repo
+  ([iam-rust-gateway](https://github.com/malvinpratama/iam-rust-gateway),
+  [iam-rust-auth](https://github.com/malvinpratama/iam-rust-auth),
+  [iam-rust-user](https://github.com/malvinpratama/iam-rust-user)) with shared
+  crate repos ([iam-rust-proto](https://github.com/malvinpratama/iam-rust-proto),
+  [iam-rust-common](https://github.com/malvinpratama/iam-rust-common)), pinned by
+  git tag. Each is built, versioned and deployed independently.
+- **One database instance per service** (`postgres-auth`, `postgres-user`).
+- **Event-driven cross-service flow**: register/delete no longer orchestrate
+  synchronously at the gateway. Auth writes a **transactional outbox** in the
+  same DB transaction; a relay (tokio task) publishes to **NATS JetStream**; the
+  user service consumes idempotently to create/drop the profile. `GET /users/me`
+  lazy-heals as the eventual-consistency safety net. The broker is optional
+  (`NATS_URL`).
+- **CI/CD per repo** (GitHub Actions): build + test, and service images
+  published to GHCR. Umbrella compose pulls the images.
+
+### Future work
+- Compensation saga (`iam.user.registration_failed`) for permanently-failed
+  profile creation — not needed today thanks to idempotent upsert + lazy heal.
+
 ### Added (v0.2 — Security+)
 - **Account recovery**: email verification (`/auth/verify-email/request`,
   `/auth/verify-email`) and password reset (`/auth/password-reset/request`,

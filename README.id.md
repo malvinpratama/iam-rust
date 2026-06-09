@@ -8,11 +8,28 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **Identity & Access Management** — microservice Auth + User dengan **RBAC
-granular**, dibangun dengan **Rust**. Implementasi Go pendamping:
-[`../iam-go`](../iam-go).
+granular**, dibangun dengan **Rust**. Ini repo **platform/umbrella**: meng-orkestrasi
+service yang di-deploy independen, serta memuat deployment, dokumentasi, dan
+koleksi API. Implementasi Go pendamping:
+[iam-go](https://github.com/malvinpratama/iam-go).
 
 > Stack: **Rust · Axum** (REST gateway) · **Tonic/gRPC** (antar-service) ·
-> **Tokio** · **PostgreSQL** · **sqlx** · **JWT** (access + refresh, bisa di-revoke).
+> **NATS JetStream** (event async) · **Tokio** · **PostgreSQL** (satu DB per
+> service) · **sqlx** · **JWT** (access + refresh, bisa di-revoke).
+
+## Repositori
+
+Tiap service adalah repo tersendiri — di-build, di-versioning, dan di-deploy
+independen; kode bersama ada di repo crate khusus.
+
+| Repo | Peran |
+|---|---|
+| [iam-rust-gateway](https://github.com/malvinpratama/iam-rust-gateway) | API gateway REST→gRPC, otorisasi per-route |
+| [iam-rust-auth](https://github.com/malvinpratama/iam-rust-auth) | Service Auth + RBAC (pemilik `auth_db`, penerbit event) |
+| [iam-rust-user](https://github.com/malvinpratama/iam-rust-user) | Service profil (pemilik `user_db`, konsumen event) |
+| [iam-rust-proto](https://github.com/malvinpratama/iam-rust-proto) | `.proto` bersama + crate kontrak tonic-build |
+| [iam-rust-common](https://github.com/malvinpratama/iam-rust-common) | Crate bersama (config, jwt, argon2, NATS, …) |
+| **iam-rust** (repo ini) | Platform: compose · k8s · docs · koleksi · smoke |
 
 ## Fitur
 
@@ -29,17 +46,25 @@ granular**, dibangun dengan **Rust**. Implementasi Go pendamping:
 ```
 client ──REST──▶ Gateway (Axum) ──gRPC──▶ Auth Service ──▶ Postgres (auth_db)
                       │            └─gRPC──▶ User Service ──▶ Postgres (user_db)
-                      └ validasi JWT, resolve permission, enforce RBAC per route
+                      │                          ▲
+                      │   register / delete      │ konsumsi
+                      └ validasi JWT, RBAC       │
+                                                 │
+        Auth ──outbox──▶ NATS JetStream ──iam.user.*──┘   (async, eventually consistent)
 ```
 
-Diagram & alur lengkap: **[docs/id/architecture.md](docs/id/architecture.md)**.
+Auth dan User tidak saling memanggil: efek lintas-service (buat profil saat
+register, hapus profil saat delete) mengalir lewat **outbox transaksional →
+NATS JetStream → konsumen idempoten**. Diagram & alur lengkap:
+**[docs/id/architecture.md](docs/id/architecture.md)**.
 
 ## Mulai cepat
 
 ```bash
-make up        # build + jalankan postgres + auth + user + gateway
-make smoke     # smoke test end-to-end ke http://localhost:8080
-make down      # hentikan + hapus volume
+make up                 # tarik image service dari GHCR + jalankan stack
+make up IMAGE_TAG=dev   # atau pakai image hasil build lokal
+make smoke              # smoke test end-to-end ke http://localhost:8080
+make down               # hentikan + hapus volume
 ```
 
 Bootstrap admin (`admin@iam.local` / `admin12345`) dibuat saat pertama boot. Lalu:
@@ -65,13 +90,14 @@ Coba lewat Postman atau Bruno — lihat
 
 ## Struktur project
 
+Repo umbrella ini hanya memuat lapisan platform; kode service ada di
+[repo per-service](#repositori).
+
 ```
-proto/                  kontrak gRPC
-crates/proto/           codegen tonic-build        crates/common/   pustaka bersama
-crates/auth-service/    Auth gRPC service          crates/user-service/  User gRPC service
-crates/gateway/         Axum REST gateway
-deploy/                 compose · k8s              scripts/         smoke.sh
-docs/                   en/ · id/ (dwibahasa)
+deploy/       docker-compose · k8s · .env.example
+docs/         en/ · id/ (dwibahasa)
+scripts/      smoke.sh
+*.json        koleksi Postman + environment
 ```
 
 ## Dokumentasi
@@ -81,15 +107,13 @@ API Reference · RBAC · Deployment · Development (dengan ERD DB) · API Collec
 
 ## Pengembangan
 
-```bash
-make build     # cargo build --workspace
-make test      # cargo test --workspace
-make clippy    # cargo clippy
-```
-
-Butuh toolchain Rust + `protobuf-compiler` (untuk `tonic-build`). Akses DB
-memakai query sqlx **runtime-checked**, jadi build Docker sepenuhnya offline.
-Detail: **[docs/id/development.md](docs/id/development.md)**.
+Tiap service dikembangkan di repo masing-masing (`make build` / `make test` /
+`make docker` di sana). Crate `proto` & `common` di-tag; service mem-pin versi
+pasti lewat git dependency. Untuk kerja lintas-repo, checkout repo berdampingan
+dan override git dep dengan `[patch]` lokal (jangan di-commit). Butuh toolchain
+Rust + `protobuf-compiler`. Akses DB memakai query sqlx **runtime-checked**, jadi
+build Docker sepenuhnya offline. Detail:
+**[docs/id/development.md](docs/id/development.md)**.
 
 ## Deployment
 

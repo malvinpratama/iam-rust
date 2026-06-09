@@ -1,30 +1,60 @@
 name: iam-rust
 
 services:
-  postgres:
+  # ── Per-service Postgres instances (one DB per service, isolated) ──────────
+  postgres-auth:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_secret}
-      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      POSTGRES_DB: ${AUTH_POSTGRES_DB:-auth_db}
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata-auth:/var/lib/postgresql/data
     ports:
-      - "127.0.0.1:5432:5432"   # bound to localhost only (not exposed externally)
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${AUTH_POSTGRES_DB:-auth_db}"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  postgres-user:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app_secret}
+      POSTGRES_DB: ${USER_POSTGRES_DB:-user_db}
+    volumes:
+      - pgdata-user:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${USER_POSTGRES_DB:-user_db}"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  # ── NATS JetStream (async events) ──────────────────────────────────────────
+  nats:
+    image: nats:2-alpine
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    volumes:
+      - natsdata:/data
+    ports:
+      - "127.0.0.1:4222:4222"
+      - "127.0.0.1:8222:8222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
       interval: 3s
       timeout: 3s
       retries: 15
 
   auth:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: auth
+    image: ghcr.io/malvinpratama/iam-rust-auth:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       AUTH_DATABASE_URL: ${AUTH_DATABASE_URL}
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
       AUTH_GRPC_PORT: ${AUTH_GRPC_PORT:-50051}
       JWT_SECRET: ${JWT_SECRET}
       JWT_ISSUER: ${JWT_ISSUER:-iam-auth}
@@ -40,29 +70,30 @@ services:
       AUDIT_ENABLED: ${AUDIT_ENABLED:-true}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
-      postgres:
+      postgres-auth:
+        condition: service_healthy
+      nats:
         condition: service_healthy
 
   user:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: user
+    image: ghcr.io/malvinpratama/iam-rust-user:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       USER_DATABASE_URL: ${USER_DATABASE_URL}
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
       USER_GRPC_PORT: ${USER_GRPC_PORT:-50052}
       APP_ENV: ${APP_ENV:-development}
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-token-change-me}
       RUST_LOG: ${RUST_LOG:-info}
     depends_on:
-      postgres:
+      postgres-user:
+        condition: service_healthy
+      nats:
         condition: service_healthy
 
   gateway:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: gateway
+    image: ghcr.io/malvinpratama/iam-rust-gateway:${IMAGE_TAG:-latest}
+    platform: linux/amd64
     environment:
       GATEWAY_HTTP_PORT: ${GATEWAY_HTTP_PORT:-8080}
       AUTH_GRPC_ADDR: ${AUTH_GRPC_ADDR:-http://auth:50051}
@@ -77,4 +108,6 @@ services:
       - user
 
 volumes:
-  pgdata:
+  pgdata-auth:
+  pgdata-user:
+  natsdata:

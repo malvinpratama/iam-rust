@@ -1,21 +1,10 @@
-.PHONY: build test fmt clippy up down logs smoke
+.PHONY: up down logs smoke k8s
 
-build:
-	cargo build --workspace
-
-test:
-	cargo test --workspace
-
-fmt:
-	cargo fmt --all
-
-clippy:
-	cargo clippy --workspace --all-targets
-
-## Run the full stack via docker-compose
+## Run the full stack via docker-compose (pulls service images from GHCR).
+## Override the tag with IMAGE_TAG (e.g. `make up IMAGE_TAG=dev`).
 up:
 	cd deploy && [ -f .env ] || cp .env.example .env
-	cd deploy && docker compose up --build -d
+	cd deploy && docker compose up -d
 
 down:
 	cd deploy && docker compose down -v
@@ -26,3 +15,7 @@ logs:
 ## End-to-end smoke test against the running gateway
 smoke:
 	./scripts/smoke.sh http://localhost:8080
+
+## Render the Kubernetes manifests
+k8s:
+	kubectl kustomize deploy/k8s
