@@ -6,6 +6,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-09
+
+### Changed
+- **Linked cross-service tracing**: upgraded the services to **tonic 0.14** and
+  added the tonic OpenTelemetry middleware — the gateway injects trace context
+  into outgoing gRPC (client layer) and auth/user continue the trace (server
+  layer). A request now appears as one linked trace (gateway → auth/user) in
+  Jaeger, matching the Go stack. Resolves the v0.5.0 follow-up note.
+
 ## [0.5.0] - 2026-06-09
 
 ### Added (v0.5 — Observability)
