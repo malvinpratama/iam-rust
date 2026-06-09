@@ -6,6 +6,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (v0.5 — Observability)
+- **Distributed tracing** (OpenTelemetry → Jaeger): the gateway traces every
+  request and key auth/user handlers are instrumented; spans export via OTLP.
+  Optional via `OTEL_EXPORTER_OTLP_ENDPOINT`. (Cross-service span linking is
+  richer on the Go stack; the Rust tonic tracing layer is a follow-up.)
+- **Prometheus metrics**: the gateway exposes `/metrics` (axum-prometheus),
+  scraped by a bundled Prometheus.
+- **Grafana** with a provisioned Prometheus datasource and an "IAM Overview"
+  dashboard (request rate, p95 latency, status, in-flight).
+- **Correlation IDs**: `X-Request-Id` accepted/generated and echoed per request.
+- Compose adds `jaeger` (UI :16686), `prometheus` (:9090), `grafana` (:3000).
+
 ## [0.4.0] - 2026-06-09
 
 ### Changed (v0.4 — True microservices)
