@@ -8,10 +8,27 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **Identity & Access Management** — Auth + User microservices with **granular
-RBAC**, built in **Rust**. Sibling Go implementation: [iam-go](https://github.com/malvinpratama/iam-go).
+RBAC**, built in **Rust**. This is the **platform/umbrella** repo: it orchestrates
+the independently-deployed services and holds the deployment, docs and API
+collections. Sibling Go implementation: [iam-go](https://github.com/malvinpratama/iam-go).
 
 > Stack: **Rust · Axum** (REST gateway) · **Tonic/gRPC** (inter-service) ·
-> **Tokio** · **PostgreSQL** · **sqlx** · **JWT** (access + refresh, revocable).
+> **NATS JetStream** (async events) · **Tokio** · **PostgreSQL** (one DB per
+> service) · **sqlx** · **JWT** (access + refresh, revocable).
+
+## Repositories
+
+Each service is its own repo — built, versioned and deployed independently;
+shared code lives in dedicated crate repos.
+
+| Repo | Role |
+|---|---|
+| [iam-rust-gateway](https://github.com/malvinpratama/iam-rust-gateway) | REST→gRPC API gateway, per-route authorization |
+| [iam-rust-auth](https://github.com/malvinpratama/iam-rust-auth) | Auth + RBAC gRPC service (owns `auth_db`, publishes events) |
+| [iam-rust-user](https://github.com/malvinpratama/iam-rust-user) | Profile gRPC service (owns `user_db`, consumes events) |
+| [iam-rust-proto](https://github.com/malvinpratama/iam-rust-proto) | Shared `.proto` + tonic-build contracts crate |
+| [iam-rust-common](https://github.com/malvinpratama/iam-rust-common) | Shared crate (config, jwt, argon2, NATS, …) |
+| **iam-rust** (this repo) | Platform: compose · k8s · docs · collections · smoke |
 
 ## Features
 
@@ -28,17 +45,25 @@ RBAC**, built in **Rust**. Sibling Go implementation: [iam-go](https://github.co
 ```
 client ──REST──▶ Gateway (Axum) ──gRPC──▶ Auth Service ──▶ Postgres (auth_db)
                       │            └─gRPC──▶ User Service ──▶ Postgres (user_db)
-                      └ validates JWT, resolves permissions, enforces RBAC per route
+                      │                          ▲
+                      │   register / delete      │ consumes
+                      └ validates JWT, RBAC      │
+                                                 │
+        Auth ──outbox──▶ NATS JetStream ──iam.user.*──┘   (async, eventually consistent)
 ```
 
-Full diagrams & flows: **[docs/en/architecture.md](docs/en/architecture.md)**.
+Auth and User never call each other: cross-service effects (profile create on
+register, profile delete on delete) flow through a **transactional outbox →
+NATS JetStream → idempotent consumer**. Full diagrams & flows:
+**[docs/en/architecture.md](docs/en/architecture.md)**.
 
 ## Quick start
 
 ```bash
-make up        # build + run postgres + auth + user + gateway
-make smoke     # end-to-end smoke test against http://localhost:8080
-make down      # stop + remove volumes
+make up                 # pull service images from GHCR + run the full stack
+make up IMAGE_TAG=dev   # or use locally-built images
+make smoke              # end-to-end smoke test against http://localhost:8080
+make down               # stop + remove volumes
 ```
 
 A bootstrap admin (`admin@iam.local` / `admin12345`) is created on first boot.
@@ -63,13 +88,14 @@ Try it with Postman or Bruno — see **[docs/en/api-collections.md](docs/en/api-
 
 ## Project structure
 
+This umbrella repo holds only the platform layer; service code lives in the
+[per-service repos](#repositories).
+
 ```
-proto/                  gRPC contracts
-crates/proto/           tonic-build codegen        crates/common/   shared libs
-crates/auth-service/    Auth gRPC service          crates/user-service/  User gRPC service
-crates/gateway/         Axum REST gateway
-deploy/                 compose · k8s              scripts/         smoke.sh
-docs/                   en/ · id/ (bilingual)
+deploy/       docker-compose · k8s · .env.example
+docs/         en/ · id/ (bilingual)
+scripts/      smoke.sh
+*.json        Postman collection + environment
 ```
 
 ## Documentation
@@ -79,15 +105,13 @@ Reference · RBAC · Deployment · Development (with DB ERD) · API Collections.
 
 ## Development
 
-```bash
-make build     # cargo build --workspace
-make test      # cargo test --workspace
-make clippy    # cargo clippy
-```
-
-Requires the Rust toolchain + `protobuf-compiler` (for `tonic-build`). DB access
-uses sqlx **runtime-checked** queries, so the Docker build is fully offline.
-Details: **[docs/en/development.md](docs/en/development.md)**.
+Each service is developed in its own repo (`make build` / `make test` /
+`make docker` there). The `proto` and `common` crates are tagged; services pin
+exact versions via git dependencies. For cross-repo work, check the repos out
+side by side and override the git deps with a local `[patch]` (kept out of git).
+Requires the Rust toolchain + `protobuf-compiler`. DB access uses sqlx
+**runtime-checked** queries, so the Docker build is fully offline. Details:
+**[docs/en/development.md](docs/en/development.md)**.
 
 ## Deployment
 
